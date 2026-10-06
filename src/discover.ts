@@ -185,7 +185,7 @@ export async function discoverModelsViaAcp(
 
     await request('initialize', {
       protocolVersion: 1,
-      clientInfo: { name: 'dsh-plugin-devin', version: '0.1.0' },
+      clientInfo: { name: '@quonaro/dsh-plugin-devin', version: '0.1.0' },
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
     })
 

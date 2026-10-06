@@ -1,6 +1,6 @@
 # dsh-plugin-devin
 
-Delegate tasks to the [Devin CLI](https://devin.ai) from DeepSeek Harness — one `devin` tool plus a `/devin` command running `devin -p` (headless print mode) through the `ctx.subprocess` seam.
+Unofficial bridge between the [Devin CLI](https://devin.ai) and DeepSeek Harness: a `devin` delegation tool plus a `/devin` command running `devin -p` (headless print mode), and a `devin` LLM provider route with automatic model discovery — all over the `ctx.subprocess` seam. Not affiliated with Cognition.
 
 ## What the agent gets
 
@@ -58,11 +58,11 @@ pnpm test        # typecheck + tsdown build + smoke test (uses a fake devin bina
 - `--print` mode fails on the workspace-trust prompt in untrusted directories; that's why `respectWorkspaceTrust: false` is the default. Set it `true` if you prefer Devin's own trust flow.
 - An alternative shape — a persistent `devin acp` bridge with resumable sessions — is deliberately out of scope for v0.1; `resume` still lets you chain `-p` calls by session ID.
 
-## Provider half (`dsh-plugin-devin/provider`)
+## Provider half (`@quonaro/dsh-plugin-devin/provider`)
 
 The package also ships an LLM-adapter entry point that registers `devin` as a **provider route** — it shows up in Settings → Models and `/model`, and the whole dsh agent loop can run on it.
 
-Each generation spawns `devin -p` with the flattened conversation transcript and streams stdout back as one text block. `listModels` comes from the `models` config table (`{id, devinModel, name}`); the session-title aux call is answered locally when `localSessionTitles` is on.
+Each generation spawns `devin -p` with the flattened conversation transcript and streams stdout back as one text block. `listModels` probes `devin acp` (ACP `initialize` + `session/new`) for the account's real model catalog and falls back to the static `models` table (`{id, devinModel, name}`) on failure; the session-title aux call is answered locally when `localSessionTitles` is on.
 
 **Semantics:** Devin is an agent, not a model. Every model call is a complete headless Devin session running its own tool loop — per-response latency is minutes, and harness-side tools are never invoked. The `devin` *tool* (main entry) is the right shape for delegation; the provider exists for routing whole conversations through Devin.
 
@@ -73,7 +73,7 @@ Each generation spawns `devin -p` with the flattened conversation transcript and
 | `models` | `default`, `opus` | Advertised model ids → `--model` value + display name |
 | `brief` | (English wrapper) | Instruction prepended to each flattened transcript |
 | `localSessionTitles` | `true` | Don't spend a Devin run on session-title generation |
-| `autoDiscoverModels` | `true` | Probe `devin acp` (`initialize` + `session/new`) for the account's real model catalog — same mechanism OmniACP uses. Falls back to the static `models` table on failure |
+| `autoDiscoverModels` | `true` | Probe `devin acp` (`initialize` + `session/new`) for the account's real model catalog — the same mechanism ACP clients like Zed use. Falls back to the static `models` table on failure |
 | `discoveryTimeoutMs` | `60000` | Timeout for one discovery probe |
 | `discoveryCacheMs` | `300000` | Cache a successful probe before re-probing |
 

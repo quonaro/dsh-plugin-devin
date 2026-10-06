@@ -12,6 +12,12 @@
     "delegation"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quonaro/dsh-plugin-devin.git"
+  },
+  "bugs": "https://github.com/quonaro/dsh-plugin-devin/issues",
+  "homepage": "https://github.com/quonaro/dsh-plugin-devin#readme",
   "publishConfig": {
     "access": "public"
   },
