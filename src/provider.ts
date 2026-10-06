@@ -1,5 +1,5 @@
 /**
- * dsh-plugin-devin/provider — expose the Devin CLI as an LLM provider route.
+ * @quonaro/dsh-plugin-devin/provider — expose the Devin CLI as an LLM provider route.
  *
  * Registers provider `devin` with `ctx.llm.registerAdapter`, so it appears
  * alongside ordinary model providers (Settings → Models, `/model`, agent
@@ -11,7 +11,7 @@
  * loop internally and cannot invoke this harness's tools. Use it to hand
  * whole tasks to Devin; per-token latency is minutes, not milliseconds.
  *
- * @module dsh-plugin-devin/provider
+ * @module @quonaro/dsh-plugin-devin/provider
  */
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
@@ -31,8 +31,8 @@ import { discoverModelsViaAcp, type DiscoveryResult } from './discover.ts'
 // Re-exported so the inferred Config type can name Dict in the emitted .d.ts (TS2883).
 export type { Dict } from '@deepseek-ai/cosmokit'
 
-/** Plugin name; the cordis.patch.yml row uses the `dsh-plugin-devin/provider` specifier. */
-export const name = 'dsh-plugin-devin-provider'
+/** Plugin name; the cordis.patch.yml row uses the `@quonaro/dsh-plugin-devin/provider` specifier. */
+export const name = '@quonaro/dsh-plugin-devin/provider'
 
 /** Services this plugin needs: the llm adapter registry and a subprocess provider. */
 export const inject = ['llm', 'subprocess']

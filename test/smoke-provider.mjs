@@ -8,7 +8,7 @@ import { spawn as spawnChild } from 'node:child_process'
 import assert from 'node:assert/strict'
 
 const plugin = await import('../lib/provider.js')
-assert.equal(plugin.name, 'dsh-plugin-devin-provider')
+assert.equal(plugin.name, '@quonaro/dsh-plugin-devin/provider')
 assert.equal(typeof plugin.apply, 'function')
 
 // Fake devin: streams two stdout lines then exits 0.

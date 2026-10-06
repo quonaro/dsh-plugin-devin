@@ -17,11 +17,14 @@ Cancelling the tool call aborts the child via the subprocess seam's terminate es
 ## Install
 
 ```sh
-# from a local checkout
-dsh plugin --profile <your-profile> add /path/to/dsh-plugin-devin
+# from npm
+dsh plugin --profile <your-profile> add @quonaro/dsh-plugin-devin
 
 # or straight from a git host
 dsh plugin --profile <your-profile> add github:quonaro/dsh-plugin-devin
+
+# or from a local checkout
+dsh plugin --profile <your-profile> add /path/to/dsh-plugin-devin
 ```
 
 The package declares `dsh.bundle`, so `dsh plugin add` applies `cordis.patch.yml` to the profile automatically. On pnpm ≥ 10 the first git install refuses the `prepare` build — copy the package key pnpm prints into the profile's `pnpm-workspace.yaml` `allowBuilds:` and re-run.

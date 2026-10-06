@@ -4,7 +4,7 @@
 # Config fields, so it must match `name` in package.json and src/index.ts.
 - insert:
     - id: dsh-plugin-devin
-      name: dsh-plugin-devin
+      name: '@quonaro/dsh-plugin-devin'
       config:
         # Path or PATH-resolved name of the Devin CLI executable.
         devinPath: 'devin'
@@ -39,7 +39,7 @@
     # Provider half: registers `devin` as an LLM provider route (Settings → Models).
     # Remove this row if you only want the delegation tool.
     - id: dsh-plugin-devin-provider
-      name: 'dsh-plugin-devin/provider'
+      name: '@quonaro/dsh-plugin-devin/provider'
       config:
         devinPath: 'devin'
         permissionMode: 'accept-edits'

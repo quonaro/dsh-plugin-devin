@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import assert from 'node:assert/strict'
 
 const plugin = await import('../lib/index.js')
-assert.equal(plugin.name, 'dsh-plugin-devin')
+assert.equal(plugin.name, '@quonaro/dsh-plugin-devin')
 assert.equal(typeof plugin.apply, 'function')
 
 // Fake devin CLI: echoes args, exits 0.

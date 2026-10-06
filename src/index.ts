@@ -10,7 +10,7 @@
  * Auth: the spawned CLI reads credentials stored by `devin auth login`
  * (or WINDSURF_API_KEY when forwarded via Config.forwardEnv).
  *
- * @module dsh-plugin-devin
+ * @module @quonaro/dsh-plugin-devin
  */
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
@@ -19,7 +19,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { devinPrintArgv, forwardedEnv } from './shared.ts'
 
 /** Host plugin name; must match package.json `name` and the cordis.patch.yml row id. */
-export const name = 'dsh-plugin-devin'
+export const name = '@quonaro/dsh-plugin-devin'
 
 /** Services this plugin needs before it loads: the tool registry and a subprocess provider. */
 export const inject = ['tools', 'subprocess']
