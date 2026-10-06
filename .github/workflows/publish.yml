@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   publish:
@@ -26,6 +27,6 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
 
-      - run: pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Trusted publishing (OIDC): no NPM_TOKEN needed — npmjs.com has a
+      # trusted-publisher link to this repo + workflow filename.
+      - run: npm publish --access public
