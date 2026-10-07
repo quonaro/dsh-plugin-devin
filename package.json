@@ -1,6 +1,6 @@
 {
   "name": "@quonaro/dsh-plugin-devin",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Devin CLI inside DeepSeek Harness: a `devin` delegation tool, a /devin command, and a `devin` LLM provider route — all over the ctx.subprocess seam.",
   "keywords": [
     "deepseek-harness",
