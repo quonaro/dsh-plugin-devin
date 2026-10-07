@@ -3,8 +3,12 @@
  *
  * Registers provider `devin` with `ctx.llm.registerAdapter`, so it appears
  * alongside ordinary model providers (Settings → Models, `/model`, agent
- * presets). Each generation spawns `devin -p` with the flattened transcript
- * and streams its stdout back as one text block.
+ * presets). Generation rides `devin acp` through a pooled connection: one ACP
+ * process serves many sessions, a harness conversation (GenerateOptions
+ * .sessionId) maps to one persistent session, a fresh session receives the
+ * whole transcript (native image blocks included), and a reused one receives
+ * only the unsent tail. `transport: 'print'` falls back to the original
+ * `devin -p` text-only path.
  *
  * Semantics worth knowing before enabling: Devin is an agent, not a model.
  * Every call is a complete headless Devin session — it runs its own tool
@@ -18,14 +22,19 @@ import type { Context, Volatile } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type {
   ContentBlock,
+  FinishReason,
   GenerateOptions,
+  TokenUsage,
+  ImageBlock,
   LlmModelInfo,
   LlmResolvedModelInfo,
   RequestMessage,
   StreamChunk,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+import { readFile } from 'node:fs/promises'
 import { devinPrintArgv, forwardedEnv } from './shared.ts'
+import { AcpPool } from './acp.ts'
 import { discoverModelsViaAcp, type DiscoveryResult } from './discover.ts'
 
 // Re-exported so the inferred Config type can name Dict in the emitted .d.ts (TS2883).
@@ -68,6 +77,17 @@ export interface Config {
    * as a model backend and must finish autonomously.
    */
   brief: Volatile<string>
+  /**
+   * Generation transport: 'acp' speaks `devin acp` (native image blocks, real
+   * token usage, streamed reasoning); 'print' spawns `devin -p` (text only —
+   * images degrade to `[image]` placeholders). `cloud` and
+   * `respectWorkspaceTrust` only apply to 'print'.
+   */
+  transport: Volatile<'acp' | 'print'>
+  /** Maximum image occurrences attached to one ACP prompt (most recent win). */
+  maxImages: Volatile<number>
+  /** Per-image byte cap; larger attachments degrade to `[image]` placeholders. */
+  maxImageBytes: Volatile<number>
   /** Answer session-title requests locally instead of spending a Devin run on them. */
   localSessionTitles: Volatile<boolean>
   /** Probe `devin acp` for the account's real model catalog instead of using the static `models` table. */
@@ -76,6 +96,12 @@ export interface Config {
   discoveryTimeoutMs: Volatile<number>
   /** How long a successful discovery result is cached before re-probing. */
   discoveryCacheMs: Volatile<number>
+  /**
+   * Idle lifetime for pooled ACP sessions and processes. An expired session is
+   * forgotten (the next turn creates one and replays the transcript); an empty
+   * expired connection is terminated. 0 disables reaping.
+   */
+  sessionIdleMs: Volatile<number>
 }
 
 const DEFAULT_BRIEF =
@@ -105,10 +131,14 @@ export const Config = Schema.object({
     { id: 'opus', devinModel: 'opus', name: 'Devin Opus' },
   ] as { id: string; devinModel: string; name: string }[]).volatile(),
   brief: Schema.string().default(DEFAULT_BRIEF).volatile(),
+  transport: Schema.union(['acp', 'print'] as const).default('acp').volatile(),
+  maxImages: Schema.number().default(8).volatile(),
+  maxImageBytes: Schema.number().default(5_242_880).volatile(),
   localSessionTitles: Schema.boolean().default(true).volatile(),
   autoDiscoverModels: Schema.boolean().default(true).volatile(),
   discoveryTimeoutMs: Schema.number().default(60_000).volatile(),
   discoveryCacheMs: Schema.number().default(300_000).volatile(),
+  sessionIdleMs: Schema.number().default(900_000).volatile(),
 })
 
 const ROLE_LABEL: Record<string, string> = {
@@ -119,14 +149,14 @@ const ROLE_LABEL: Record<string, string> = {
   tool: 'tool result',
 }
 
-/** Project one message's blocks into transcript text. */
-function blocksToText(blocks: readonly ContentBlock[]): string {
+/** Project one message's blocks into transcript text. `imageLabel` customizes image placeholders (ACP transport numbers attached images). */
+function blocksToText(blocks: readonly ContentBlock[], imageLabel?: (block: ImageBlock) => string): string {
   return blocks.map((block) => {
     switch (block.type) {
       case 'text': return block.text
       case 'reasoning': return `<thinking>\n${block.text}\n</thinking>`
       case 'tool-call': return `[tool call ${block.name} #${block.id}]: ${block.arguments}`
-      case 'image': return '[image]'
+      case 'image': return imageLabel?.(block) ?? '[image]'
       case 'file': return '[file]'
       case 'tool-addition': return `[tool enabled: ${block.toolName}]`
       case 'tool-removal': return `[tool disabled: ${block.toolName}]`
@@ -135,12 +165,12 @@ function blocksToText(blocks: readonly ContentBlock[]): string {
   }).join('\n')
 }
 
-/** Flatten one generation request into the prompt handed to `devin -p`. */
-function buildPrompt(options: GenerateOptions, brief: string): string {
+/** Flatten one generation request into the prompt handed to `devin -p` / ACP `session/prompt`. */
+function buildPrompt(options: GenerateOptions, brief: string, imageLabel?: (block: ImageBlock) => string): string {
   const parts: string[] = [brief, '', '<transcript>']
   if (options.system) parts.push('## system', options.system, '')
   for (const message of options.messages) {
-    parts.push(`## ${ROLE_LABEL[message.role] ?? message.role}`, blocksToText(message.content), '')
+    parts.push(`## ${ROLE_LABEL[message.role] ?? message.role}`, blocksToText(message.content, imageLabel), '')
   }
   parts.push('</transcript>')
   if (options.tools?.length) {
@@ -150,11 +180,55 @@ function buildPrompt(options: GenerateOptions, brief: string): string {
   return parts.join('\n')
 }
 
+/**
+ * Flatten only the unsent tail of a transcript for a reused ACP session. The
+ * session already holds the brief and history, so the tail is role-labeled
+ * text — except a lone user message, which reads as a natural continuation.
+ */
+function buildTailPrompt(tail: readonly RequestMessage[], imageLabel?: (block: ImageBlock) => string): string {
+  if (tail.length === 1 && tail[0]!.role === 'user') {
+    return blocksToText(tail[0]!.content, imageLabel)
+  }
+  const parts: string[] = []
+  for (const message of tail) {
+    parts.push(`## ${ROLE_LABEL[message.role] ?? message.role}`, blocksToText(message.content, imageLabel), '')
+  }
+  return parts.join('\n').trimEnd()
+}
+
 /** Map an advertised route id to its `--model` value; unknown ids pass through verbatim. */
 function resolveDevinModel(routeId: string, table: readonly { id: string; devinModel: string }[]): string {
   const entry = table.find((m) => m.id === routeId)
   if (entry) return entry.devinModel
   return routeId === 'default' ? '' : routeId
+}
+
+/** Map an ACP session/prompt stopReason onto the provider-neutral finish vocabulary. */
+function finishFor(stopReason: string | undefined): FinishReason {
+  switch (stopReason) {
+    case 'end_turn':
+    case 'stop_sequence':
+      return { kind: 'stop' }
+    case 'max_tokens':
+    case 'max_turn_requests':
+      return { kind: 'max-tokens' }
+    case 'cancelled':
+      return { kind: 'aborted', failure: { code: 'DEVIN_CANCELLED', message: 'devin acp cancelled the turn' } }
+    case 'refusal':
+      return { kind: 'error', failure: { code: 'DEVIN_REFUSAL', message: 'devin refused the prompt' } }
+    default:
+      return { kind: 'stop' }
+  }
+}
+
+/** Normalize an ACP usage payload (all fields optional) into the adapter's TokenUsage contract. */
+function usageFor(event: { inputTokens?: number | undefined; outputTokens?: number | undefined; totalTokens?: number | undefined; cacheReadTokens?: number | undefined }): TokenUsage {
+  return {
+    inputTokens: event.inputTokens ?? 0,
+    outputTokens: event.outputTokens ?? 0,
+    ...(event.totalTokens !== undefined ? { totalTokens: event.totalTokens } : {}),
+    ...(event.cacheReadTokens !== undefined ? { cacheReadTokens: event.cacheReadTokens } : {}),
+  }
 }
 
 /** Last user text, for cheap local session titles. */
@@ -175,13 +249,32 @@ function lastUserText(messages: readonly RequestMessage[]): string {
  * carries no runtime import of @deepseek-ai/dsh-llm.
  */
 class DevinLlmAdapter {
+  /** Pooled `devin acp` processes; one connection per spawn spec, one ACP session per harness conversation. */
+  private readonly pool: AcpPool
+
+  /** Idle reaper — forgets expired session indexes, reclaims empty processes. */
+  private readonly reaper: NodeJS.Timeout
+
   constructor(
     private readonly ctx: Context,
     private readonly config: Config,
-  ) {}
+  ) {
+    this.pool = new AcpPool(ctx)
+    this.reaper = setInterval(() => {
+      const idleMs = this.config.sessionIdleMs.get()
+      if (idleMs > 0) this.pool.reap(idleMs)
+    }, 60_000)
+    this.reaper.unref()
+  }
+
+  /** Terminate pooled agent processes; called when the plugin fiber unloads. */
+  async dispose(): Promise<void> {
+    clearInterval(this.reaper)
+    await this.pool.close()
+  }
 
   providerInfo(provider: string): { id: string; name: string } {
-    return { id: provider, name: 'Devin' }
+    return { id: provider, name: 'Devin ACP' }
   }
 
   providerRetryPolicy(_provider: string): undefined {
@@ -214,7 +307,13 @@ class DevinLlmAdapter {
     }
   }
 
+  /** Route modalities: the ACP transport feeds image blocks natively; print is text-only. */
+  private modalities(): readonly ('text' | 'image')[] {
+    return this.config.transport.get() === 'acp' ? ['text', 'image'] : ['text']
+  }
+
   async listModels(provider: string): Promise<LlmModelInfo[]> {
+    const inputModalities = this.modalities()
     const discovered = await this.discover()
     if (discovered && discovered.models.length > 0) {
       const currentId = discovered.currentId
@@ -224,14 +323,14 @@ class DevinLlmAdapter {
           id: 'default',
           name: 'Devin (account default)',
           description: currentId ? `Resolves to the session default (${currentId})` : 'Devin CLI agent, spawned headless per generation',
-          inputModalities: ['text' as const],
+          inputModalities,
         },
         ...discovered.models.map((m) => ({
           provider,
           id: m.id,
           name: m.name,
           description: m.description ?? 'Devin CLI agent, spawned headless per generation',
-          inputModalities: ['text' as const] as readonly ('text')[],
+          inputModalities,
         })),
       ]
     }
@@ -240,7 +339,7 @@ class DevinLlmAdapter {
       id: entry.id,
       name: entry.name || `Devin ${entry.id}`,
       description: 'Devin CLI agent, spawned headless per generation',
-      inputModalities: ['text' as const],
+      inputModalities,
     }))
   }
 
@@ -249,7 +348,7 @@ class DevinLlmAdapter {
       provider,
       id: model,
       name: `Devin ${model}`,
-      inputModalities: ['text' as const],
+      inputModalities: this.modalities(),
     })
   }
 
@@ -272,6 +371,199 @@ class DevinLlmAdapter {
       return
     }
 
+    yield* this.config.transport.get() === 'acp' ? this.streamAcp(options) : this.streamPrint(options)
+  }
+
+  /** Minimal structural face of the host attachment store (ctx.attachments). */
+  private attachments(): { imageHostPath(ref: unknown): string | undefined } | undefined {
+    try {
+      return (this.ctx as unknown as { get?(name: string): unknown }).get?.('attachments') as
+        | { imageHostPath(ref: unknown): string | undefined }
+        | undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Resolve image blocks to ACP image content blocks. The most recent
+   * `maxImages` non-offloaded occurrences win; the returned labeler marks each
+   * occurrence in the transcript as `[image N]` (attached) or `[image]`.
+   */
+  private async collectImages(
+    messages: readonly RequestMessage[],
+  ): Promise<{ blocks: { type: 'image'; data: string; mimeType: string; name?: string }[]; label: (block: ImageBlock) => string }> {
+    const labels = new Map<ImageBlock, string>()
+    const blocks: { type: 'image'; data: string; mimeType: string; name?: string }[] = []
+    const store = this.attachments()
+    if (store) {
+      const candidates: ImageBlock[] = []
+      for (const message of messages) {
+        for (const block of message.content) {
+          if (block.type === 'image') candidates.push(block)
+        }
+      }
+      // The most recent `maxImages` non-offloaded occurrences get attached.
+      const attachable = new Set(candidates.filter((b) => !b.offloaded).slice(-this.config.maxImages.get()))
+      const maxBytes = this.config.maxImageBytes.get()
+      let next = 0
+      for (const block of candidates) {
+        // Offloaded occurrences keep placeholder semantics — but Devin is a
+        // local agent that can Read files, so name the recovery path.
+        if (block.offloaded) {
+          try {
+            const path = store.imageHostPath(block.attachment)
+            if (path) labels.set(block, `[image not attached${block.attachment.name ? `: ${block.attachment.name}` : ''} — read-only copy at ${path}]`)
+          } catch { /* plain placeholder */ }
+          continue
+        }
+        if (!attachable.has(block)) continue
+        try {
+          const path = store.imageHostPath(block.attachment)
+          if (!path || block.attachment.bytes > maxBytes) continue
+          const data = await readFile(path)
+          if (data.byteLength > maxBytes) continue
+          next += 1
+          labels.set(block, `[image ${next}${block.attachment.name ? `: ${block.attachment.name}` : ''}]`)
+          blocks.push({
+            type: 'image',
+            data: data.toString('base64'),
+            mimeType: block.attachment.mediaType,
+            ...(block.attachment.name ? { name: block.attachment.name } : {}),
+          })
+        } catch {
+          // Resolution failures degrade to a plain placeholder.
+        }
+      }
+    }
+    return { blocks, label: (block) => labels.get(block) ?? '[image]' }
+  }
+
+  /**
+   * ACP generation over the pooled connection. The conversation session is
+   * resolved first: a fresh one receives the whole transcript (brief +
+   * `<transcript>` + every image), a reused one only the messages after
+   * `sentCount` and their images.
+   */
+  private async *streamAcp(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const timeout = AbortSignal.timeout(this.config.timeoutMs.get())
+    const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
+
+    // Compaction/session-title calls must not pollute the conversation's own
+    // session, so only a plain generation gets the persistent session key.
+    const conversationKey = options.purpose ? '' : String(options.sessionId ?? '')
+
+    // Block indexes: 0 = visible text, 1 = reasoning. Open lazily on first delta.
+    let textAcc = ''
+    let reasoningAcc = ''
+    let textOpen = false
+    let reasoningOpen = false
+
+    const closeBlocks = function* (): Generator<StreamChunk> {
+      if (textOpen) yield { type: 'block-end', index: 0, block: { type: 'text', text: textAcc } }
+      if (reasoningOpen) yield { type: 'block-end', index: 1, block: { type: 'reasoning', text: reasoningAcc } }
+    }
+
+    let entry: Awaited<ReturnType<AcpPool['session']>>
+    try {
+      entry = await this.pool.session({
+        spawn: {
+          devinPath: this.config.devinPath.get(),
+          env: this.config.forwardEnv.get(),
+          cwd: this.config.cwd.get() || process.cwd(),
+          extraArgs: this.config.extraArgs.get(),
+          stderrMaxBytes: this.config.stderrMaxBytes.get(),
+        },
+        conversationKey,
+        model: resolveDevinModel(options.model, this.config.models.get()),
+        permissionMode: this.config.permissionMode.get(),
+        totalMessages: options.messages.length,
+        signal,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            code: options.signal?.aborted ? 'DEVIN_ABORTED' : timeout.aborted ? 'DEVIN_TIMEOUT' : 'DEVIN_ACP',
+            message,
+          },
+        },
+      }
+      return
+    }
+
+    // Built lazily at send time: a session nobody has written to gets the
+    // whole transcript (brief + <transcript> + every image); a session that
+    // already holds history gets only the unsent tail and its images — never
+    // a replay, which would duplicate the context the agent keeps.
+    const buildPromptNow = async (): Promise<readonly unknown[]> => {
+      const sent = entry.st.sentCount
+      const tail = sent === 0
+        ? options.messages
+        : sent < options.messages.length
+          ? options.messages.slice(sent)
+          : options.messages.slice(-1)
+      const { blocks: imageBlocks, label } = await this.collectImages(tail)
+      const text = sent === 0
+        ? buildPrompt(options, this.config.brief.get(), label)
+        : buildTailPrompt(tail, label)
+      return [{ type: 'text', text }, ...imageBlocks]
+    }
+
+    try {
+      for await (const event of this.pool.turn(entry, { prompt: buildPromptNow, totalMessages: options.messages.length, signal })) {
+        switch (event.kind) {
+          case 'text':
+            if (!textOpen) { yield { type: 'block-start', index: 0, blockType: 'text' }; textOpen = true }
+            textAcc += event.text
+            yield { type: 'text-delta', index: 0, text: event.text }
+            break
+          case 'thought':
+            if (!reasoningOpen) { yield { type: 'block-start', index: 1, blockType: 'reasoning' }; reasoningOpen = true }
+            reasoningAcc += event.text
+            yield { type: 'reasoning-delta', index: 1, text: event.text }
+            break
+          case 'usage':
+            if (event.usage.inputTokens !== undefined || event.usage.outputTokens !== undefined) {
+              yield { type: 'usage', usage: usageFor(event.usage) }
+            }
+            break
+          case 'done':
+            yield* closeBlocks()
+            yield { type: 'finish', reason: finishFor(event.stopReason) }
+            return
+        }
+      }
+      // The generator ended without a 'done' (e.g. child died mid-run).
+      yield* closeBlocks()
+      yield {
+        type: 'finish',
+        reason: { kind: 'error', failure: { code: 'DEVIN_ACP_EOF', message: 'devin acp ended the session without a prompt response' } },
+      }
+    } catch (err) {
+      yield* closeBlocks()
+      const message = err instanceof Error ? err.message : String(err)
+      if (options.signal?.aborted) {
+        yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'DEVIN_ABORTED', message } } }
+      } else if (timeout.aborted) {
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { code: 'DEVIN_TIMEOUT', message: `devin exceeded timeoutMs=${this.config.timeoutMs.get()} and was terminated` } },
+        }
+      } else {
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { code: 'DEVIN_ACP', message } },
+        }
+      }
+    }
+  }
+
+  /** Print-mode generation: spawn `devin -p` once and stream stdout as one text block. */
+  private async *streamPrint(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const env = forwardedEnv(this.config.forwardEnv.get())
     const executable = await this.ctx.subprocess.resolveExecutable(this.config.devinPath.get(), env, options.signal)
 
@@ -355,11 +647,16 @@ class DevinLlmAdapter {
  * configurable-provider directory so the web Models page can see it.
  */
 export function apply(ctx: Context, config: Config): void {
-  ctx.llm.registerAdapter(['devin'], new DevinLlmAdapter(ctx, config))
-  ctx.llm.registerConfigurableProviders([{
-    provider: 'devin',
-    displayName: 'Devin',
-    settingsNs: name,
-    settingsPath: [],
-  }])
+  ctx.effect(() => {
+    const adapter = new DevinLlmAdapter(ctx, config)
+    ctx.llm.registerAdapter(['devin'], adapter)
+    ctx.llm.registerConfigurableProviders([{
+      provider: 'devin',
+      displayName: 'Devin ACP',
+      settingsNs: name,
+      settingsPath: [],
+    }])
+    // Disposer runs when the plugin fiber unloads — terminate pooled agents.
+    return () => adapter.dispose()
+  })
 }

@@ -24,6 +24,7 @@ const ctx = {
     registerAdapter: (providers, adapter) => { registered = { providers, adapter }; return () => {} },
     registerConfigurableProviders: (entries) => { configurable.push(...entries); return () => {} },
   },
+  effect: (fn) => { const dispose = fn(); return () => dispose?.() },
   subprocess: {
     async resolveExecutable(cmd) { return cmd },
     spawn(spec) {
@@ -52,14 +53,16 @@ const config = Object.fromEntries(
     forwardEnv: [], extraArgs: [],
     models: [{ id: 'default', devinModel: '', name: 'Devin (account default)' }],
     brief: 'TEST-BRIEF',
+    transport: 'print', maxImages: 8, maxImageBytes: 5242880,
     localSessionTitles: true,
     autoDiscoverModels: false, discoveryTimeoutMs: 15000, discoveryCacheMs: 300000,
+    sessionIdleMs: 900000,
   }).map(([k, v]) => [k, { get: () => v }]),
 )
 
 plugin.apply(ctx, config)
 assert.deepEqual(registered.providers, ['devin'])
-assert.equal(registered.adapter.providerInfo('devin').name, 'Devin')
+assert.equal(registered.adapter.providerInfo('devin').name, 'Devin ACP')
 assert.equal(configurable[0].provider, 'devin')
 
 const models = await registered.adapter.listModels('devin')

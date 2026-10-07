@@ -1,72 +1,87 @@
+# yaml-language-server: $schema=none
 # Bundle config layer for dsh-plugin-devin. Applied to a profile by `dsh plugin add`.
 #
 # The row `id` is also the settings namespace the loader derives for volatile
 # Config fields, so it must match `name` in package.json and src/index.ts.
 - insert:
-    - id: dsh-plugin-devin
-      name: '@quonaro/dsh-plugin-devin'
-      config:
-        # Path or PATH-resolved name of the Devin CLI executable.
-        devinPath: 'devin'
-        # Permission mode passed as `--permission-mode`. Headless `devin -p`
-        # cannot answer prompts, so pick a mode that does not stall:
-        # accept-edits auto-approves file edits, bypass auto-approves everything.
-        permissionMode: 'accept-edits'
-        # Default model for spawned sessions; empty means the CLI/account default.
-        model: ''
-        # Pass --cloud to drive Devin Cloud sessions instead of the local agent.
-        cloud: false
-        # Cooperative timeout for one delegation call.
-        timeoutMs: 600000
-        # In-memory cap per output stream; overflow keeps the tail.
-        maxOutputBytes: 1048576
-        # When false (default) the plugin passes `--respect-workspace-trust false`
-        # so non-interactive runs do not fail in untrusted directories.
-        respectWorkspaceTrust: false
-        # Environment variable names forwarded to the devin child process on top
-        # of the subprocess seam's scrubbed base. Devin needs HOME/XDG paths to
-        # find stored credentials; WINDSURF_API_KEY is forwarded when present.
-        forwardEnv:
-          - PATH
-          - HOME
-          - USER
-          - XDG_CONFIG_HOME
-          - XDG_DATA_HOME
-          - WINDSURF_API_KEY
-        # Extra CLI flags appended verbatim before the prompt, e.g. ['--sandbox'].
-        extraArgs: []
+  - id: dsh-plugin-devin
+    name: '@quonaro/dsh-plugin-devin'
+    config:
+      # Path or PATH-resolved name of the Devin CLI executable.
+      devinPath: 'devin'
+      # Permission mode passed as `--permission-mode`. Headless `devin -p`
+      # cannot answer prompts, so pick a mode that does not stall:
+      # accept-edits auto-approves file edits, bypass auto-approves everything.
+      permissionMode: 'accept-edits'
+      # Default model for spawned sessions; empty means the CLI/account default.
+      model: ''
+      # Pass --cloud to drive Devin Cloud sessions instead of the local agent.
+      cloud: false
+      # Cooperative timeout for one delegation call.
+      timeoutMs: 600000
+      # In-memory cap per output stream; overflow keeps the tail.
+      maxOutputBytes: 1048576
+      # When false (default) the plugin passes `--respect-workspace-trust false`
+      # so non-interactive runs do not fail in untrusted directories.
+      respectWorkspaceTrust: false
+      # Environment variable names forwarded to the devin child process on top
+      # of the subprocess seam's scrubbed base. Devin needs HOME/XDG paths to
+      # find stored credentials; WINDSURF_API_KEY is forwarded when present.
+      forwardEnv:
+      - PATH
+      - HOME
+      - USER
+      - XDG_CONFIG_HOME
+      - XDG_DATA_HOME
+      - WINDSURF_API_KEY
+      # Extra CLI flags appended verbatim before the prompt, e.g. ['--sandbox'].
+      extraArgs: []
 
-    # Provider half: registers `devin` as an LLM provider route (Settings → Models).
-    # Remove this row if you only want the delegation tool.
-    - id: dsh-plugin-devin-provider
-      name: '@quonaro/dsh-plugin-devin/provider'
-      config:
-        devinPath: 'devin'
-        permissionMode: 'accept-edits'
-        cloud: false
-        cwd: ''
-        timeoutMs: 1800000
-        stderrMaxBytes: 65536
-        respectWorkspaceTrust: false
-        forwardEnv:
-          - PATH
-          - HOME
-          - USER
-          - XDG_CONFIG_HOME
-          - XDG_DATA_HOME
-          - WINDSURF_API_KEY
-        extraArgs: []
-        models:
-          - id: default
-            devinModel: ''
-            name: 'Devin (account default)'
-          - id: opus
-            devinModel: 'opus'
-            name: 'Devin Opus'
-        localSessionTitles: true
-        # Probe `devin acp` (initialize + session/new) for the account's real
-        # model catalog; falls back to the static `models` table on failure.
-        autoDiscoverModels: true
-        discoveryTimeoutMs: 60000
-        # Cache a successful probe this long before re-probing.
-        discoveryCacheMs: 300000
+  # Provider half: registers `devin` as an LLM provider route (Settings → Models).
+  # Remove this row if you only want the delegation tool.
+  - id: dsh-plugin-devin-provider
+    name: '@quonaro/dsh-plugin-devin/provider'
+    config:
+      devinPath: 'devin'
+      permissionMode: 'accept-edits'
+      cloud: false
+      cwd: ''
+      timeoutMs: 1800000
+      stderrMaxBytes: 65536
+      respectWorkspaceTrust: false
+      forwardEnv:
+      - PATH
+      - HOME
+      - USER
+      - XDG_CONFIG_HOME
+      - XDG_DATA_HOME
+      - WINDSURF_API_KEY
+      extraArgs: []
+      models:
+      - id: default
+        devinModel: ''
+        name: 'Devin (account default)'
+      - id: opus
+        devinModel: 'opus'
+        name: 'Devin Opus'
+      # Generation transport: 'acp' drives `devin acp` session/prompt with
+      # native image blocks and real token usage; 'print' falls back to
+      # `devin -p` (text only — attached images degrade to placeholders).
+      # `cloud` and `respectWorkspaceTrust` only apply to 'print'.
+      transport: 'acp'
+      # Most recent image occurrences attached to one ACP prompt.
+      maxImages: 8
+      # Per-image byte cap; larger attachments degrade to `[image]` placeholders.
+      maxImageBytes: 5242880
+      localSessionTitles: true
+      # Probe `devin acp` (initialize + session/new) for the account's real
+      # model catalog; falls back to the static `models` table on failure.
+      autoDiscoverModels: true
+      discoveryTimeoutMs: 60000
+      # Cache a successful probe this long before re-probing.
+      discoveryCacheMs: 300000
+      # Idle lifetime of pooled ACP sessions and the `devin acp` process (ms).
+      # An expired session is forgotten — the next turn on that conversation
+      # creates one and replays the transcript; an empty expired connection is
+      # terminated. 0 disables reaping.
+      sessionIdleMs: 900000

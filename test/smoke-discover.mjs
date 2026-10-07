@@ -25,7 +25,7 @@ rl.on('line', (line) => {
       configOptions: [
         { id: 'mode', category: 'mode', type: 'select', currentValue: 'code', options: [{ value: 'code', name: 'Code' }] },
         { id: 'model', category: 'model', type: 'select', currentValue: 'swe-2-high', options: [
-          { value: 'adaptive', name: 'Adaptive' },
+          { value: 'adaptive', name: 'Adaptive', _meta: { 'cognition.ai/supportsImages': true } },
           { value: 'swe-2-high', name: 'SWE-2' },
           { options: [{ value: 'grouped-model', name: 'Grouped One' }], name: 'Group A' }
         ] }
@@ -42,6 +42,7 @@ const ctx = {
     registerAdapter: (providers, adapter) => { registered = { providers, adapter }; return () => {} },
     registerConfigurableProviders: () => () => {},
   },
+  effect: (fn) => { const dispose = fn(); return () => dispose?.() },
   subprocess: {
     async resolveExecutable(cmd) { return cmd },
     spawn(spec) {
@@ -66,7 +67,9 @@ const config = Object.fromEntries(
     forwardEnv: [], extraArgs: [],
     models: [{ id: 'default', devinModel: '', name: 'Devin (account default)' }],
     brief: 'B', localSessionTitles: true,
+    transport: 'acp', maxImages: 8, maxImageBytes: 5242880,
     autoDiscoverModels: true, discoveryTimeoutMs: 15000, discoveryCacheMs: 300000,
+    sessionIdleMs: 900000,
   }).map(([k, v]) => [k, { get: () => v }]),
 )
 
@@ -76,4 +79,5 @@ const ids = models.map((m) => m.id)
 assert.deepEqual(ids, ['default', 'adaptive', 'swe-2-high', 'grouped-model'])
 assert.equal(models[2].name, 'SWE-2')
 assert.match(models[0].description, /swe-2-high/)
+assert.deepEqual(models[0].inputModalities, ['text', 'image'])
 console.log('smoke-discover: PASS')

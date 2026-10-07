@@ -52,7 +52,7 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf lib",
-    "smoke": "node test/smoke.mjs && node test/smoke-provider.mjs && node test/smoke-discover.mjs",
+    "smoke": "node test/smoke.mjs && node test/smoke-provider.mjs && node test/smoke-discover.mjs && node test/smoke-acp.mjs",
     "test": "pnpm typecheck && pnpm build && pnpm smoke",
     "prepare": "tsdown"
   },
